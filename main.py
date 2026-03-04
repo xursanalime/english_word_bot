@@ -1,61 +1,52 @@
 import telebot
 import random
-import json
-import os
+import sqlite3
 
-# ⚠️ TOKENNI O'ZGARTIR
-TOKEN = "8571176898:AAEnH6ohjXaAXsSqIsAi8dnNaRDbWNb_QFk"
+TOKEN = "8571176898:AAECTz6AQpIDW4b5JDJwm_RnTEHzsRHz0_Y"
 
 bot = telebot.TeleBot(TOKEN)
 
-DATA_FILE = "data.json"
+# ================= DATABASE =================
 
+conn = sqlite3.connect("words.db", check_same_thread=False)
+cursor = conn.cursor()
 
-# ============ USER RESET ============
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS words(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+unit TEXT,
+eng TEXT,
+uzb TEXT
+)
+""")
 
-def reset_user(chat_id):
-    user_state.pop(chat_id, None)
-    current_unit.pop(chat_id, None)
-    current_quiz.pop(chat_id, None)
-    writing_quiz.pop(chat_id, None)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS stats(
+id INTEGER PRIMARY KEY,
+tests INTEGER,
+correct INTEGER,
+wrong INTEGER
+)
+""")
 
+cursor.execute("INSERT OR IGNORE INTO stats VALUES(1,0,0,0)")
+conn.commit()
 
-# ============ LOAD / SAVE ============
+# ================= VARIABLES =================
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {
-            "units": {},
-            "stats": {
-                "tests": 0,
-                "correct": 0,
-                "wrong": 0
-            }
-        }
+user_state = {}
+current_unit = {}
+current_quiz = {}
+writing_quiz = {}
 
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-
-data = load_data()
-
-
-# ============ MENU ============
+# ================= MENU =================
 
 def main_menu():
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-
     markup.row("➕ So'z qo‘shish", "📝 Test Quiz")
     markup.row("✍️ Writing Quiz", "📊 Statistika")
     markup.row("❌ Clear All")
-
     return markup
-
 
 
 def back_menu():
@@ -64,7 +55,13 @@ def back_menu():
     return markup
 
 
-# ============ START ============
+def reset_user(chat_id):
+    user_state.pop(chat_id, None)
+    current_unit.pop(chat_id, None)
+    current_quiz.pop(chat_id, None)
+    writing_quiz.pop(chat_id, None)
+
+# ================= START =================
 
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -77,16 +74,7 @@ def start(message):
         reply_markup=main_menu()
     )
 
-
-# ============ VARIABLES ============
-
-user_state = {}
-current_unit = {}
-current_quiz = {}
-writing_quiz = {}
-
-
-# ============ ADD WORDS ============
+# ================= ADD WORDS =================
 
 @bot.message_handler(func=lambda m: m.text == "➕ So'z qo‘shish")
 def add_words(message):
@@ -108,19 +96,13 @@ def get_unit(message):
         bot.send_message(message.chat.id, "Menu", reply_markup=main_menu())
         return
 
-    unit = message.text.strip()
+    current_unit[message.chat.id] = message.text.strip()
 
-    if unit not in data["units"]:
-        data["units"][unit] = {}
-
-    current_unit[message.chat.id] = unit
     user_state[message.chat.id] = "wait_words"
-
-    save_data(data)
 
     bot.send_message(
         message.chat.id,
-        f"✅ {unit} tanlandi.\nSo‘zlarni yubor:\nenglish=uzbek",
+        "So‘zlarni yubor:\nenglish=uzbek",
         reply_markup=back_menu()
     )
 
@@ -154,11 +136,14 @@ def save_words(message):
         eng = eng.strip().lower()
         uzb = uzb.strip().lower()
 
-        if eng and uzb:
-            data["units"][unit][eng] = uzb
-            count += 1
+        cursor.execute(
+            "INSERT INTO words(unit,eng,uzb) VALUES(?,?,?)",
+            (unit, eng, uzb)
+        )
 
-    save_data(data)
+        count += 1
+
+    conn.commit()
 
     reset_user(message.chat.id)
 
@@ -168,28 +153,26 @@ def save_words(message):
         reply_markup=main_menu()
     )
 
-
-# ============ TEST QUIZ ============
+# ================= TEST QUIZ =================
 
 @bot.message_handler(func=lambda m: m.text == "📝 Test Quiz")
-def start_test_quiz(message):
+def start_test(message):
 
-    if not data["units"]:
+    cursor.execute("SELECT DISTINCT unit FROM words")
+    units = cursor.fetchall()
+
+    if not units:
         bot.send_message(message.chat.id, "❗ Unit yo‘q.")
         return
 
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
 
-    for unit in data["units"]:
-        markup.add(unit)
+    for u in units:
+        markup.add(u[0])
 
     markup.add("📚 All", "🔙 Orqaga")
 
-    bot.send_message(
-        message.chat.id,
-        "Unit tanla:",
-        reply_markup=markup
-    )
+    bot.send_message(message.chat.id, "Unit tanla:", reply_markup=markup)
 
     user_state[message.chat.id] = "choose_test_unit"
 
@@ -202,23 +185,18 @@ def choose_test_unit(message):
         bot.send_message(message.chat.id, "Menu", reply_markup=main_menu())
         return
 
-    text = message.text
-    words = {}
-
-    if text == "📚 All":
-        for u in data["units"].values():
-            words.update(u)
-
-    elif text in data["units"]:
-        words = data["units"][text]
-
+    if message.text == "📚 All":
+        cursor.execute("SELECT eng,uzb FROM words")
     else:
-        bot.send_message(message.chat.id, "❗ Xato tanlov")
-        return
+        cursor.execute("SELECT eng,uzb FROM words WHERE unit=?", (message.text,))
 
-    if not words:
+    rows = cursor.fetchall()
+
+    if not rows:
         bot.send_message(message.chat.id, "❗ Bu unitda so‘z yo‘q.")
         return
+
+    words = {eng: uzb for eng, uzb in rows}
 
     user_state.pop(message.chat.id)
 
@@ -227,25 +205,14 @@ def choose_test_unit(message):
 
 def start_test_real(message, words):
 
-    if not words:
-        return
-
     eng, uzb = random.choice(list(words.items()))
 
-    direction = random.choice([0, 1])
+    answer = eng
 
-    if direction == 0:
-        question = f"🇬🇧 {eng} → ?"
-        answer = uzb
-        pool = list(words.values())
-    else:
-        question = f"🇺🇿 {uzb} → ?"
-        answer = eng
-        pool = list(words.keys())
-
+    pool = list(words.keys())
     variants = [answer]
 
-    while len(variants) < 4:
+    while len(variants) < 4 and len(pool) >= 4:
         v = random.choice(pool)
         if v not in variants:
             variants.append(v)
@@ -257,18 +224,18 @@ def start_test_real(message, words):
         "words": words
     }
 
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
 
     for v in variants:
         markup.add(v)
 
     markup.add("🔙 Orqaga")
 
-    bot.send_message(message.chat.id, question, reply_markup=markup)
+    bot.send_message(message.chat.id, f"🇺🇿 {uzb} → ?", reply_markup=markup)
 
 
 @bot.message_handler(func=lambda m: m.chat.id in current_quiz)
-def check_test_answer(message):
+def check_test(message):
 
     if message.text == "🔙 Orqaga":
         current_quiz.pop(message.chat.id)
@@ -280,41 +247,44 @@ def check_test_answer(message):
     answer = quiz["answer"]
     words = quiz["words"]
 
-    data["stats"]["tests"] += 1
+    cursor.execute("UPDATE stats SET tests = tests + 1 WHERE id=1")
 
     if message.text == answer:
-        data["stats"]["correct"] += 1
+
+        cursor.execute("UPDATE stats SET correct = correct + 1 WHERE id=1")
+
         bot.send_message(message.chat.id, "✅ To‘g‘ri!")
+
     else:
-        data["stats"]["wrong"] += 1
+
+        cursor.execute("UPDATE stats SET wrong = wrong + 1 WHERE id=1")
+
         bot.send_message(message.chat.id, f"❌ Xato! {answer}")
 
-    save_data(data)
+    conn.commit()
 
     start_test_real(message, words)
 
-
-# ============ WRITING QUIZ ============
+# ================= WRITING QUIZ =================
 
 @bot.message_handler(func=lambda m: m.text == "✍️ Writing Quiz")
-def start_writing_quiz(message):
+def start_writing(message):
 
-    if not data["units"]:
+    cursor.execute("SELECT DISTINCT unit FROM words")
+    units = cursor.fetchall()
+
+    if not units:
         bot.send_message(message.chat.id, "❗ Unit yo‘q.")
         return
 
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
 
-    for unit in data["units"]:
-        markup.add(unit)
+    for u in units:
+        markup.add(u[0])
 
     markup.add("📚 All", "🔙 Orqaga")
 
-    bot.send_message(
-        message.chat.id,
-        "Unit tanla:",
-        reply_markup=markup
-    )
+    bot.send_message(message.chat.id, "Unit tanla:", reply_markup=markup)
 
     user_state[message.chat.id] = "choose_write_unit"
 
@@ -327,23 +297,18 @@ def choose_write_unit(message):
         bot.send_message(message.chat.id, "Menu", reply_markup=main_menu())
         return
 
-    text = message.text
-    words = {}
-
-    if text == "📚 All":
-        for u in data["units"].values():
-            words.update(u)
-
-    elif text in data["units"]:
-        words = data["units"][text]
-
+    if message.text == "📚 All":
+        cursor.execute("SELECT eng,uzb FROM words")
     else:
-        bot.send_message(message.chat.id, "❗ Xato tanlov")
-        return
+        cursor.execute("SELECT eng,uzb FROM words WHERE unit=?", (message.text,))
 
-    if not words:
+    rows = cursor.fetchall()
+
+    if not rows:
         bot.send_message(message.chat.id, "❗ Bu unitda so‘z yo‘q.")
         return
+
+    words = {eng: uzb for eng, uzb in rows}
 
     user_state.pop(message.chat.id)
 
@@ -352,13 +317,10 @@ def choose_write_unit(message):
 
 def start_write_real(message, words):
 
-    if not words:
-        return
-
     eng, uzb = random.choice(list(words.items()))
 
     writing_quiz[message.chat.id] = {
-        "answer": eng.lower(),
+        "answer": eng,
         "words": words
     }
 
@@ -373,7 +335,7 @@ def start_write_real(message, words):
 
 
 @bot.message_handler(func=lambda m: m.chat.id in writing_quiz)
-def check_write_answer(message):
+def check_write(message):
 
     if message.text == "🔙 Orqaga":
         writing_quiz.pop(message.chat.id)
@@ -385,65 +347,54 @@ def check_write_answer(message):
     answer = quiz["answer"]
     words = quiz["words"]
 
-    user_answer = message.text.lower().strip()
+    cursor.execute("UPDATE stats SET tests = tests + 1 WHERE id=1")
 
-    data["stats"]["tests"] += 1
+    if message.text.lower().strip() == answer:
 
-    if user_answer == answer:
-        data["stats"]["correct"] += 1
+        cursor.execute("UPDATE stats SET correct = correct + 1 WHERE id=1")
+
         bot.send_message(message.chat.id, "✅ To‘g‘ri!")
+
     else:
-        data["stats"]["wrong"] += 1
+
+        cursor.execute("UPDATE stats SET wrong = wrong + 1 WHERE id=1")
+
         bot.send_message(message.chat.id, f"❌ Xato! {answer}")
 
-    save_data(data)
+    conn.commit()
 
     start_write_real(message, words)
 
-
-# ============ STAT ============
+# ================= STAT =================
 
 @bot.message_handler(func=lambda m: m.text == "📊 Statistika")
 def stat(message):
 
-    s = data["stats"]
+    cursor.execute("SELECT tests,correct,wrong FROM stats WHERE id=1")
+
+    tests, correct, wrong = cursor.fetchone()
 
     text = f"""
-📊 Statistika:
+📊 Statistika
 
-📝 Testlar: {s['tests']}
-✅ To‘g‘ri: {s['correct']}
-❌ Xato: {s['wrong']}
+📝 Testlar: {tests}
+✅ To‘g‘ri: {correct}
+❌ Xato: {wrong}
 """
 
     bot.send_message(message.chat.id, text, reply_markup=main_menu())
 
-
-# ============ CLEAR ============
+# ================= CLEAR =================
 
 @bot.message_handler(func=lambda m: m.text == "❌ Clear All")
 def clear_all(message):
 
-    global data
+    cursor.execute("DELETE FROM words")
+    cursor.execute("UPDATE stats SET tests=0,correct=0,wrong=0 WHERE id=1")
+    conn.commit()
 
-    data = {
-        "units": {},
-        "stats": {
-            "tests": 0,
-            "correct": 0,
-            "wrong": 0
-        }
-    }
+    bot.send_message(message.chat.id, "🗑 Tozalandi!", reply_markup=main_menu())
 
-    save_data(data)
+# ================= RUN =================
 
-    bot.send_message(
-        message.chat.id,
-        "🗑 Tozalandi!",
-        reply_markup=main_menu()
-    )
-
-
-# ============ RUN ============
-
-bot.infinity_polling()
+bot.infinity_polling(skip_pending=True)
